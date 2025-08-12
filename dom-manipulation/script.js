@@ -240,9 +240,16 @@
       return;
     }
 
-    quotes.push(ensureQuoteMeta({ text, category }));
+    const newQuote = ensureQuoteMeta({ text, category });
+    quotes.push(newQuote);
     saveQuotes();
     populateCategories();
+    setStatus('New quote added locally. Syncing to server...');
+    postQuoteToServer(newQuote).then(() => {
+      setStatus('New quote synced to server.');
+    }).catch((err) => {
+      setStatus('Failed to post quote to server: ' + (err && err.message ? err.message : 'Unknown error'));
+    });
 
     if (inputText) inputText.value = '';
     if (inputCategory) inputCategory.value = '';
@@ -369,19 +376,54 @@
     fileReader.readAsText(file);
   }
 
+  async function fetchQuotesFromServer(limit = 20) {
+    const resp = await fetch(`${SERVER_ENDPOINT}?_limit=${encodeURIComponent(limit)}`);
+    const posts = await resp.json();
+    return Array.isArray(posts)
+      ? posts.map(p => ensureQuoteMeta({
+          id: `server-${p.id}`,
+          text: ((p.title || p.body || '').toString().trim()) || `Server post #${p.id}`,
+          category: `Server:user-${p.userId}`,
+          updatedAt: Date.now(),
+        }))
+      : [];
+  }
+
+  async function postQuoteToServer(quote) {
+    try {
+      const payload = {
+        title: quote.text,
+        body: quote.category,
+        userId: 1,
+      };
+      const resp = await fetch(SERVER_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json();
+      if (data && (data.id || data.ID)) {
+        const serverId = data.id || data.ID;
+        // Update local quote id to server-prefixed for traceability
+        const idx = quotes.findIndex(q => q.id === quote.id);
+        if (idx !== -1) {
+          quotes[idx].id = `server-${serverId}`;
+          quotes[idx].updatedAt = Date.now();
+          saveQuotes();
+        }
+      }
+      return data;
+    } catch (e) {
+      throw e;
+    }
+  }
+
   async function syncWithServer() {
     setStatus('Syncing with server...');
     try {
-      const resp = await fetch(`${SERVER_ENDPOINT}?_limit=20`);
-      const posts = await resp.json();
-      const serverQuotes = Array.isArray(posts)
-        ? posts.map(p => ensureQuoteMeta({
-            id: `server-${p.id}`,
-            text: ((p.title || p.body || '').toString().trim()) || `Server post #${p.id}`,
-            category: `Server:user-${p.userId}`,
-            updatedAt: Date.now(),
-          }))
-        : [];
+      const serverQuotes = await fetchQuotesFromServer(20);
 
       const localById = new Map(quotes.map(q => [q.id, q]));
       let newCount = 0;
@@ -423,6 +465,10 @@
     } catch (e) {
       setStatus('Sync failed: ' + (e && e.message ? e.message : 'Unknown error'));
     }
+  }
+
+  async function syncQuotes() {
+    await syncWithServer();
   }
 
   function reviewConflicts() {
@@ -520,6 +566,9 @@
   window.exportToJsonFile = exportToJsonFile;
   window.syncWithServer = syncWithServer;
   window.reviewConflicts = reviewConflicts;
+  window.fetchQuotesFromServer = fetchQuotesFromServer;
+  window.postQuoteToServer = postQuoteToServer;
+  window.syncQuotes = syncQuotes;
 
   function init() {
     createAddQuoteForm();
@@ -528,8 +577,8 @@
     ensureImportExportUI();
     ensureStatusUI();
     ensureSyncUI();
-    syncWithServer();
-    setInterval(syncWithServer, SYNC_INTERVAL_MS);
+    syncQuotes();
+    setInterval(syncQuotes, SYNC_INTERVAL_MS);
 
     if (newQuoteBtn) newQuoteBtn.addEventListener('click', showRandomQuote);
 
