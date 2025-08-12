@@ -2,8 +2,12 @@
   const STORAGE_KEY_QUOTES = 'dqg_quotes';
   const STORAGE_KEY_SELECTED_CATEGORY = 'dqg_selected_category';
   const SESSION_KEY_LAST_QUOTE = 'dqg_last_quote';
+  const SERVER_ENDPOINT = 'https://jsonplaceholder.typicode.com/posts';
+  const SYNC_INTERVAL_MS = 15000;
 
   let quotes = [];
+
+  let conflicts = [];
 
   const quoteDisplay = document.getElementById('quoteDisplay');
   const newQuoteBtn = document.getElementById('newQuote');
@@ -63,6 +67,22 @@
     ];
   }
 
+  function generateId() {
+    if (window.crypto && window.crypto.randomUUID) {
+      return `local-${window.crypto.randomUUID()}`;
+    }
+    return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function ensureQuoteMeta(q) {
+    const obj = { ...q };
+    if (!obj.id) obj.id = generateId();
+    if (!obj.updatedAt) obj.updatedAt = Date.now();
+    obj.text = (obj.text || '').toString();
+    obj.category = (obj.category || '').toString();
+    return obj;
+  }
+
   function saveQuotes() {
     localStorage.setItem(STORAGE_KEY_QUOTES, JSON.stringify(quotes));
   }
@@ -84,6 +104,8 @@
       quotes = defaultQuotes();
       saveQuotes();
     }
+    quotes = quotes.map(q => ensureQuoteMeta(q));
+    saveQuotes();
   }
 
   function getUniqueCategories() {
@@ -218,7 +240,7 @@
       return;
     }
 
-    quotes.push({ text, category });
+    quotes.push(ensureQuoteMeta({ text, category }));
     saveQuotes();
     populateCategories();
 
@@ -268,6 +290,51 @@
     }
   }
 
+  function ensureStatusUI() {
+    if (!document.getElementById('syncStatus')) {
+      const div = document.createElement('div');
+      div.id = 'syncStatus';
+      document.body.appendChild(div);
+    }
+  }
+
+  function setStatus(msg) {
+    const el = document.getElementById('syncStatus');
+    if (el) el.textContent = msg;
+  }
+
+  function ensureSyncUI() {
+    let container = document.getElementById('syncControls');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'syncControls';
+      document.body.appendChild(container);
+    }
+
+    if (!document.getElementById('syncNowBtn')) {
+      const btn = document.createElement('button');
+      btn.id = 'syncNowBtn';
+      btn.textContent = 'Sync Now';
+      btn.addEventListener('click', syncWithServer);
+      container.appendChild(btn);
+    }
+
+    if (!document.getElementById('reviewConflictsBtn')) {
+      const btn2 = document.createElement('button');
+      btn2.id = 'reviewConflictsBtn';
+      btn2.textContent = 'Review Conflicts (0)';
+      btn2.addEventListener('click', reviewConflicts);
+      container.appendChild(btn2);
+    }
+
+    if (!document.getElementById('conflictList')) {
+      const list = document.createElement('div');
+      list.id = 'conflictList';
+      list.hidden = true;
+      container.appendChild(list);
+    }
+  }
+
   function importFromJsonFile(event) {
     const file = event.target.files && event.target.files[0];
     if (!file) return;
@@ -284,7 +351,7 @@
 
         if (sanitized.length === 0) throw new Error('No valid quotes found in file.');
 
-        quotes.push(...sanitized);
+        quotes.push(...sanitized.map(ensureQuoteMeta));
         saveQuotes();
         populateCategories();
         alert('Quotes imported successfully!');
@@ -302,6 +369,147 @@
     fileReader.readAsText(file);
   }
 
+  async function syncWithServer() {
+    setStatus('Syncing with server...');
+    try {
+      const resp = await fetch(`${SERVER_ENDPOINT}?_limit=20`);
+      const posts = await resp.json();
+      const serverQuotes = Array.isArray(posts)
+        ? posts.map(p => ensureQuoteMeta({
+            id: `server-${p.id}`,
+            text: ((p.title || p.body || '').toString().trim()) || `Server post #${p.id}`,
+            category: `Server:user-${p.userId}`,
+            updatedAt: Date.now(),
+          }))
+        : [];
+
+      const localById = new Map(quotes.map(q => [q.id, q]));
+      let newCount = 0;
+      let updateCount = 0;
+      let conflictCount = 0;
+      const newConflicts = [];
+
+      serverQuotes.forEach(s => {
+        if (localById.has(s.id)) {
+          const idx = quotes.findIndex(q => q.id === s.id);
+          if (idx !== -1) {
+            const lq = quotes[idx];
+            if (lq.text !== s.text || lq.category !== s.category) {
+              quotes[idx] = s;
+              updateCount++;
+            }
+          }
+        } else {
+          const conflictIdx = quotes.findIndex(q => q.text === s.text && q.id !== s.id);
+          if (conflictIdx !== -1) {
+            const localConflict = quotes[conflictIdx];
+            quotes.splice(conflictIdx, 1);
+            quotes.push(s);
+            newConflicts.push({ id: s.id, local: localConflict, server: s });
+            conflictCount++;
+          } else {
+            quotes.push(s);
+            newCount++;
+          }
+        }
+      });
+
+      conflicts = newConflicts;
+      saveQuotes();
+      populateCategories();
+      updateConflictButton();
+      setStatus(`Sync complete: ${newCount} new, ${updateCount} updated, ${conflictCount} conflicts`);
+      showRandomQuote();
+    } catch (e) {
+      setStatus('Sync failed: ' + (e && e.message ? e.message : 'Unknown error'));
+    }
+  }
+
+  function reviewConflicts() {
+    ensureSyncUI();
+    const list = document.getElementById('conflictList');
+    if (!list) return;
+    list.innerHTML = '';
+
+    if (conflicts.length === 0) {
+      list.hidden = true;
+      alert('No conflicts to review.');
+      return;
+    }
+
+    conflicts.forEach(c => {
+      const item = document.createElement('div');
+      const text = document.createElement('p');
+      text.textContent = `Conflict: "${c.server.text}" | Local category: ${c.local.category} vs Server category: ${c.server.category}`;
+
+      const keepLocal = document.createElement('button');
+      keepLocal.textContent = 'Keep Local';
+      keepLocal.addEventListener('click', () => resolveConflictKeepLocal(c.id));
+
+      const keepServer = document.createElement('button');
+      keepServer.textContent = 'Keep Server';
+      keepServer.addEventListener('click', () => resolveConflictKeepServer(c.id));
+
+      item.appendChild(text);
+      item.appendChild(keepLocal);
+      item.appendChild(keepServer);
+      list.appendChild(item);
+    });
+
+    list.hidden = false;
+  }
+
+  function resolveConflictKeepLocal(conflictId) {
+    const cIdx = conflicts.findIndex(c => c.id === conflictId);
+    if (cIdx === -1) return;
+    const c = conflicts[cIdx];
+
+    const sIdx = quotes.findIndex(q => q.id === c.server.id);
+    if (sIdx !== -1) {
+      quotes.splice(sIdx, 1);
+    }
+
+    if (quotes.findIndex(q => q.id === c.local.id) === -1) {
+      quotes.push(ensureQuoteMeta(c.local));
+    }
+
+    conflicts.splice(cIdx, 1);
+    saveQuotes();
+    populateCategories();
+    updateConflictButton();
+    setStatus('Conflict resolved: kept local.');
+    reviewConflicts();
+    showRandomQuote();
+  }
+
+  function resolveConflictKeepServer(conflictId) {
+    const cIdx = conflicts.findIndex(c => c.id === conflictId);
+    if (cIdx === -1) return;
+    const c = conflicts[cIdx];
+
+    if (quotes.findIndex(q => q.id === c.server.id) === -1) {
+      quotes.push(ensureQuoteMeta(c.server));
+    }
+
+    const lIdx = quotes.findIndex(q => q.id === c.local.id);
+    if (lIdx !== -1) {
+      quotes.splice(lIdx, 1);
+    }
+
+    conflicts.splice(cIdx, 1);
+    saveQuotes();
+    populateCategories();
+    updateConflictButton();
+    setStatus('Conflict resolved: kept server.');
+    reviewConflicts();
+    showRandomQuote();
+  }
+
+  function updateConflictButton() {
+    const btn = document.getElementById('reviewConflictsBtn');
+    if (btn) btn.textContent = `Review Conflicts (${conflicts.length})`;
+  }
+
   // Expose functions globally for inline handlers and manual access
   window.showRandomQuote = showRandomQuote;
   window.createAddQuoteForm = createAddQuoteForm;
@@ -310,12 +518,18 @@
   window.filterQuotes = filterQuotes;
   window.importFromJsonFile = importFromJsonFile;
   window.exportToJsonFile = exportToJsonFile;
+  window.syncWithServer = syncWithServer;
+  window.reviewConflicts = reviewConflicts;
 
   function init() {
     createAddQuoteForm();
     loadQuotes();
     ensureCategoryFilter();
     ensureImportExportUI();
+    ensureStatusUI();
+    ensureSyncUI();
+    syncWithServer();
+    setInterval(syncWithServer, SYNC_INTERVAL_MS);
 
     if (newQuoteBtn) newQuoteBtn.addEventListener('click', showRandomQuote);
 
