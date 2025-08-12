@@ -154,8 +154,8 @@
   function showRandomQuote() {
     if (!quoteDisplay) return;
 
-    const selected = localStorage.getItem(STORAGE_KEY_SELECTED_CATEGORY) || 'all';
-    const pool = selected === 'all' ? quotes : quotes.filter(q => q.category === selected);
+    const selectedCategory = localStorage.getItem(STORAGE_KEY_SELECTED_CATEGORY) || 'all';
+    const pool = selectedCategory === 'all' ? quotes : quotes.filter(q => q.category === selectedCategory);
 
     if (pool.length === 0) {
       quoteDisplay.innerHTML = '<p>No quotes available for the selected category.</p>';
@@ -201,8 +201,8 @@
 
   function filterQuotes() {
     const select = document.getElementById('categoryFilter');
-    const category = select ? select.value : 'all';
-    localStorage.setItem(STORAGE_KEY_SELECTED_CATEGORY, category);
+    const selectedCategory = select ? select.value : 'all';
+    localStorage.setItem(STORAGE_KEY_SELECTED_CATEGORY, selectedCategory);
     showRandomQuote();
   }
 
