@@ -462,6 +462,7 @@
       updateConflictButton();
       setStatus(`Sync complete: ${newCount} new, ${updateCount} updated, ${conflictCount} conflicts`);
       showRandomQuote();
+      setStatus('Quotes synced with server!');
     } catch (e) {
       setStatus('Sync failed: ' + (e && e.message ? e.message : 'Unknown error'));
     }
